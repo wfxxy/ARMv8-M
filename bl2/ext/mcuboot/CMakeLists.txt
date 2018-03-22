@@ -1,0 +1,129 @@
+#------------------------------------------------------------------------------
+# Copyright (c) 2017-2018, Arm Limited. All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+#
+#------------------------------------------------------------------------------
+
+cmake_minimum_required(VERSION 3.7)
+
+#Tell cmake where our modules can be found
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/../../../cmake)
+
+#Include common stuff to control cmake.
+include("Common/BuildSys")
+
+#Start an embedded project.
+embedded_project_start(CONFIG "${CMAKE_CURRENT_LIST_DIR}/../../../ConfigDefault.cmake")
+project(mcuboot LANGUAGES ASM C)
+embedded_project_fixup()
+
+#Check input variables
+if (NOT DEFINED BL2)
+   message(FATAL ERROR "Incomplete build configuration: BL2 is undefined.")
+elseif(NOT BL2)
+    #If mcuboot is not need to be built then stop further processing.
+    return()
+endif()
+
+if (NOT DEFINED MBEDTLS_DEBUG)
+	message(FATAL_ERROR "Incomplete build configuration: MBEDTLS_DEBUG is undefined.")
+endif()
+
+if (NOT DEFINED MBEDTLS_C_FLAGS_BL2)
+	message(FATAL_ERROR "Incomplete build configuration: MBEDTLS_C_FLAGS_BL2 is undefined.")
+endif()
+
+#Set variables to appropriate path
+set(MCUBOOT_DIR ${CMAKE_CURRENT_LIST_DIR})
+get_filename_component(TFM_ROOT_DIR "${MCUBOOT_DIR}/../../.." ABSOLUTE)
+
+set(BUILD_CMSIS_CORE On)
+set(BUILD_RETARGET On)
+set(BUILD_NATIVE_DRIVERS On)
+set(BUILD_STARTUP On)
+set(BUILD_TARGET_CFG Off)
+set(BUILD_TARGET_HARDWARE_KEYS Off)
+set(BUILD_CMSIS_DRIVERS On)
+set(BUILD_TIME Off)
+set(BUILD_UART_STDOUT On)
+set(BUILD_FLASH On)
+if(NOT DEFINED PLATFORM_CMAKE_FILE)
+	message (FATAL_ERROR "Platform specific CMake is not defined. Please set PLATFORM_CMAKE_FILE.")
+elseif(NOT EXISTS ${PLATFORM_CMAKE_FILE})
+	message (FATAL_ERROR "Platform specific CMake \"${PLATFORM_CMAKE_FILE}\" file does not exist. Please fix value of PLATFORM_CMAKE_FILE.")
+else()
+	include(${PLATFORM_CMAKE_FILE})
+endif()
+
+#Append all our source files to global lists.
+list(APPEND ALL_SRC_C "${MCUBOOT_DIR}/bl2_main.c"
+		"${MCUBOOT_DIR}/flash_map.c"
+		"${MCUBOOT_DIR}/hal_flash.c"
+		"${MCUBOOT_DIR}/os.c"
+		"${MCUBOOT_DIR}/keys.c"
+		"${MCUBOOT_DIR}/bootutil/src/loader.c"
+		"${MCUBOOT_DIR}/bootutil/src/bootutil_misc.c"
+		"${MCUBOOT_DIR}/bootutil/src/image_validate.c"
+		"${MCUBOOT_DIR}/bootutil/src/image_rsa.c"
+		"${MCUBOOT_DIR}/bootutil/src/caps.c"
+	)
+
+#Define location of mbedtls source, build, and installation directory.
+get_filename_component(MBEDTLS_SOURCE_DIR "${TFM_ROOT_DIR}/../mbedtls" ABSOLUTE)
+if(NOT EXISTS ${MBEDTLS_SOURCE_DIR})
+	message(FATAL_ERROR "Missing mbedtls. Please clone the mbedtls repo to directory \"${MBEDTLS_SOURCE_DIR}\".")
+endif()
+set (MBEDTLS_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/mbedtls")
+set (MBEDTLS_INSTALL_DIR ${MBEDTLS_BINARY_DIR}/mbedtls_install)
+
+#Set build type for mbedtls libraries
+if (MBEDTLS_DEBUG)
+	set(MBEDTLS_BUILD_TYPE "Debug")
+else()
+	set(MBEDTLS_BUILD_TYPE "Release")
+endif()
+
+#Build mbedtls as external project.
+#This ensures mbedtls is built with exactly defined settings.
+#mbedtls will be used from is't install location
+set(MBEDTLS_C_FLAGS ${MBEDTLS_C_FLAGS_BL2})
+set(MBEDTLS_TARGET_NAME "mbedtls_mcuboot_lib")
+include(${TFM_ROOT_DIR}/BuildMbedtls.cmake)
+
+#Setting include directories
+embedded_include_directories(PATH ${TFM_ROOT_DIR} ABSOLUTE APPEND)
+embedded_include_directories(PATH ${TFM_ROOT_DIR}/bl2/ext/mcuboot/include ABSOLUTE APPEND)
+embedded_include_directories(PATH ${TFM_ROOT_DIR}/bl2/ext/mcuboot/bootutil/include/ ABSOLUTE APPEND)
+embedded_include_directories(PATH ${MBEDTLS_INSTALL_DIR}/include ABSOLUTE APPEND)
+
+#Define linker file
+if(NOT DEFINED BL2_LINKER_CONFIG)
+	message(FATAL_ERROR "ERROR: Incomplete Configuration: BL2_LINKER_CONFIG is not defined.")
+endif()
+embedded_set_target_linker_file(TARGET mcuboot PATH "${BL2_LINKER_CONFIG}")
+
+add_executable(${PROJECT_NAME} ${ALL_SRC_ASM_BL2} ${ALL_SRC_C} ${ALL_SRC_CXX})
+
+#Add BL2 define to linker to resolve symbols in region_defs.h
+set_property(TARGET ${PROJECT_NAME} APPEND_STRING PROPERTY LINK_FLAGS " --predefine=\"-DBL2\"")
+
+#Link mbedcrypto library to project
+target_link_libraries(${PROJECT_NAME} "${MBEDTLS_INSTALL_DIR}/lib/${CMAKE_STATIC_LIBRARY_PREFIX_C}mbedcrypto${CMAKE_STATIC_LIBRARY_SUFFIX_C}")
+add_dependencies(${PROJECT_NAME} ${MBEDTLS_TARGET_NAME}_install)
+
+
+#Generate binary file from axf
+compiler_generate_binary_output(${PROJECT_NAME})
+
+#Set macro definitions for the project.
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+							MCUBOOT_SIGN_RSA
+							MCUBOOT_VALIDATE_SLOT0
+							MCUBOOT_USE_FLASH_AREA_GET_SECTORS
+							MBEDTLS_CONFIG_FILE="config-boot.h"
+							MCUBOOT_TARGET_CONFIG="flash_layout.h"
+						)
+
+#Finally let cmake system apply changes after the whole project is defined.
+embedded_project_end(${PROJECT_NAME})
